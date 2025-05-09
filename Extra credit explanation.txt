@@ -1,0 +1,7 @@
+
+Explanation of handling multiple clients:  multiple games are handled simultaneously using a 
+thread per game model inside of the serve_game() function. When two clients connect, 
+they are paired and then given to the handle_game() function, which is run within a new background 
+thread using threading.Thread. This allows each game to be run independently and concurrently, 
+without blocking the server from accepting new clients. We continuously loop and spawn a 
+new thread for each game, thus the server can support many simultaneous matches. 

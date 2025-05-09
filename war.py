@@ -10,96 +10,136 @@ import socket
 import socketserver
 import threading
 import sys
+from asyncio import IncompleteReadError
+import uuid
 
-
-"""
-Namedtuples work like classes, but are much more lightweight so they end
-up being faster. It would be a good idea to keep objects in each of these
-for each game which contain the game's state, for instance things like the
-socket, the cards given, the cards still available, etc.
-"""
 Game = namedtuple("Game", ["p1", "p2"])
 
-# Stores the clients waiting to get connected to other clients
 waiting_clients = []
 
-
 class Command(Enum):
-    """
-    The byte values sent as the first byte of any message in the war protocol.
-    """
     WANTGAME = 0
     GAMESTART = 1
     PLAYCARD = 2
     PLAYRESULT = 3
 
-
 class Result(Enum):
-    """
-    The byte values sent as the payload byte of a PLAYRESULT message.
-    """
     WIN = 0
     DRAW = 1
     LOSE = 2
 
 def readexactly(sock, numbytes):
-    """
-    Accumulate exactly `numbytes` from `sock` and return those. If EOF is found
-    before numbytes have been received, be sure to account for that here or in
-    the caller.
-    """
-    # TODO
-    pass
-
+    data = b''
+    while len(data) < numbytes:
+        more_data = sock.recv(numbytes - len(data))
+        if not more_data:
+            raise EOFError("Connection closed before all bytes could be read.")
+        data += more_data
+    return data
 
 def kill_game(game):
-    """
-    TODO: If either client sends a bad message, immediately nuke the game.
-    """
-    pass
-
+    logging.info(f"Killing game between {game.p1.getpeername()} and {game.p2.getpeername()}")
+    try:
+        game.p1.close()
+        game.p2.close()
+    except Exception as e:
+        logging.debug(f"Error closing sockets: {e}")
+    for client in [game.p1, game.p2]:
+        if client in waiting_clients:
+            waiting_clients.remove(client)
+    logging.info("Game killed and clients disconnected.")
 
 def compare_cards(card1, card2):
-    """
-    TODO: Given an integer card representation, return -1 for card1 < card2,
-    0 for card1 = card2, and 1 for card1 > card2
-    """
-    pass
-    
+    if card1 < card2:
+        return -1
+    elif card1 > card2:
+        return 1
+    return 0
 
 def deal_cards():
-    """
-    TODO: Randomize a deck of cards (list of ints 0..51), and return two
-    26 card "hands."
-    """
-    pass
-    
+    deck = list(range(52))
+    random.shuffle(deck)
+    return deck[:26], deck[26:]
 
 def serve_game(host, port):
-    """
-    TODO: Open a socket for listening for new connections on host:port, and
-    perform the war protocol to serve a game of war between each client.
-    This function should run forever, continually serving clients.
-    """
-    pass
-    
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind((host, port))
+    server_socket.listen(1000)
+    logging.info(f"Server listening on {host}:{port}")
 
-async def limit_client(host, port, loop, sem):
-    """
-    Limit the number of clients currently executing.
-    You do not need to change this function.
-    """
+    def handle_game(client1, client2):
+        try:
+            msg1 = readexactly(client1, 2)
+            msg2 = readexactly(client2, 2)
+            if msg1[0] != Command.WANTGAME.value or msg1[1] != 0:
+                kill_game(Game(client1, client2))
+                return
+            if msg2[0] != Command.WANTGAME.value or msg2[1] != 0:
+                kill_game(Game(client1, client2))
+                return
+
+            hand1, hand2 = deal_cards()
+            client1.send(bytes([Command.GAMESTART.value]) + bytes(hand1))
+            client2.send(bytes([Command.GAMESTART.value]) + bytes(hand2))
+
+            used_cards1 = set()
+            used_cards2 = set()
+
+            for round_num in range(26):
+                card1 = readexactly(client1, 2)
+                card2 = readexactly(client2, 2)
+
+                if card1[0] != Command.PLAYCARD.value or card2[0] != Command.PLAYCARD.value:
+                    kill_game(Game(client1, client2))
+                    return
+
+                if card1[1] in used_cards1 or card2[1] in used_cards2:
+                    kill_game(Game(client1, client2))
+                    return
+
+                used_cards1.add(card1[1])
+                used_cards2.add(card2[1])
+
+                result = compare_cards(card1[1], card2[1])
+                if result == -1:
+                    client1.send(bytes([Command.PLAYRESULT.value, Result.LOSE.value]))
+                    client2.send(bytes([Command.PLAYRESULT.value, Result.WIN.value]))
+                elif result == 1:
+                    client1.send(bytes([Command.PLAYRESULT.value, Result.WIN.value]))
+                    client2.send(bytes([Command.PLAYRESULT.value, Result.LOSE.value]))
+                else:
+                    client1.send(bytes([Command.PLAYRESULT.value, Result.DRAW.value]))
+                    client2.send(bytes([Command.PLAYRESULT.value, Result.DRAW.value]))
+
+            logging.info("Game over, disconnecting clients.")
+        except Exception as e:
+            logging.error(f"Game error: {e}")
+            kill_game(Game(client1, client2))
+        finally:
+            try:
+                client1.close()
+                client2.close()
+            except:
+                pass
+
+    while True:
+        logging.info("Waiting for new players...")
+        client1, addr1 = server_socket.accept()
+        logging.info(f"Client 1 connected from {addr1} {client1}")
+        client2, addr2 = server_socket.accept()
+        logging.info(f"Client 2 connected from {addr2} {client2}")
+        threading.Thread(target=handle_game, args=(client1, client2), daemon=True).start()
+
+async def limit_client(host, port, loop, sem, delay):
     async with sem:
+        await asyncio.sleep(delay)  # Spread out connections
         return await client(host, port, loop)
 
+
 async def client(host, port, loop):
-    """
-    Run an individual client on a given event loop.
-    You do not need to change this function.
-    """
     try:
         reader, writer = await asyncio.open_connection(host, port)
-        # send want game
         writer.write(b"\0\0")
         card_msg = await reader.readexactly(27)
         myscore = 0
@@ -118,16 +158,30 @@ async def client(host, port, loop):
             result = "drew"
         logging.debug("Game complete, I %s", result)
         writer.close()
+        await writer.wait_closed()
         return 1
     except ConnectionResetError:
         logging.error("ConnectionResetError")
         return 0
-    except asyncio.streams.IncompleteReadError:
-        logging.error("asyncio.streams.IncompleteReadError")
+    except IncompleteReadError as e:
+        logging.error(f"IncompleteReadError: {e}")
         return 0
-    except OSError:
-        logging.error("OSError")
+    except OSError as e:
+        logging.error(f"OSError: {e}")
         return 0
+
+async def client_batch(host, port, num_clients):
+    async def delayed_client(i):
+        await asyncio.sleep(i * 0.01)
+        return await client(host, port, asyncio.get_event_loop())
+
+    tasks = [delayed_client(i) for i in range(num_clients)]
+    completed = 0
+    for task in asyncio.as_completed(tasks):
+        result = await task
+        completed += result
+    logging.info(f"{completed}/{num_clients} clients completed.")
+
 
 def main(args):
     """
@@ -155,11 +209,12 @@ def main(args):
     elif args[0] == "clients":
         sem = asyncio.Semaphore(1000)
         num_clients = int(args[3])
-        clients = [limit_client(host, port, loop, sem)
-                   for x in range(num_clients)]
+        clients = [
+    limit_client(host, port, loop, sem, delay=0.01 * i)
+    for i in range(num_clients)]
         async def run_all_clients():
             """
-            use `as_completed` to spawn all clients simultaneously
+            use as_completed to spawn all clients simultaneously
             and collect their results in arbitrary order.
             """
             completed_clients = 0
@@ -176,3 +231,4 @@ if __name__ == "__main__":
     # Changing logging to DEBUG
     logging.basicConfig(level=logging.DEBUG)
     main(sys.argv[1:])
+
