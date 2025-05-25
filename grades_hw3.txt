@@ -1,0 +1,6 @@
+1: Two clients successfully completed a game with the server most of the time. 
+(There is an error in the code in the compare cards function, the cards should be either mapped to their suit order of clubs, diamonds, hearts, spades, and within each suit, the rank order by value (i.e. 2, 3, 4, … , 10, Jack, Queen, King, Ace) or the card value should be %13 in the compare cards function)
+2: The server correctly handled a game with a buggy client, and continued functioning as expected afterwards.
+3: Successfully completed multiple games at the same time.
+
+Total points: 110 - 15 = 95
